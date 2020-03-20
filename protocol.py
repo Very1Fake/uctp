@@ -43,6 +43,13 @@ class Flags:
             if not 0 <= self.cluster <= 65535:
                 raise ProtocolError('cluster_size requires 0 <= cluster_size <= 65535')
 
+    def as_dict(self) -> dict:
+        return {
+            'type': self.type,
+            'encrypted': self.encrypted,
+            'cluster': self.cluster
+        }
+
 
 @dataclass
 class Packet:
@@ -90,6 +97,16 @@ class Packet:
             self.command,
             self.checksum
         ) + self.data
+
+    def as_dict(self) -> dict:
+        return {
+            'indicator': self.indicator,
+            'version': self.version,
+            'flags': self.flags.as_dict(),
+            'command': self.command.decode('utf8'),
+            'checksum': self.checksum.hex(),
+            'data': self.data
+        }
 
 
 class Protocol:
