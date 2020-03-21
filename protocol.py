@@ -70,8 +70,6 @@ class Packet:
         else:
             if self.command.__len__() > 32:
                 raise ProtocolError('command max length is 32 symbols')
-            else:
-                self.command = struct.pack('>32s', self.command)
 
         self.checksum = sha1(self.data).digest()
 
@@ -94,7 +92,7 @@ class Packet:
             self.flags.type,
             self.flags.encrypted,
             self.flags.cluster,
-            self.command,
+            self.command.ljust(32, b'\x00'),
             self.checksum
         ) + self.data
 
@@ -191,7 +189,7 @@ class Protocol:
 
             return Packet(
                 flags,
-                raw[7:39],
+                raw[7:39].rstrip(b'\x00'),
                 bytes(decrypted) if flags.encrypted else raw[59:],
                 raw[39:59] if flags.encrypted else None
             )
