@@ -15,6 +15,18 @@ class ProtocolError(Exception):
     pass
 
 
+class PacketError(Exception):
+    pass
+
+
+class VersionError(Exception):
+    pass
+
+
+class DamageError(Exception):
+    pass
+
+
 INDICATOR = b'\x06\xa7'
 PATTERN = '!HBB?H32s20s'
 
@@ -31,17 +43,17 @@ class Flags:
 
     def __post_init__(self):
         if not isinstance(self.type, int):
-            raise ProtocolError('type must be int')
+            raise ValueError('type must be int')
         else:
             if not 0 <= self.type <= 255:
-                raise ProtocolError('type requires 0 <= type <= 255')
+                raise ValueError('type requires 0 <= type <= 255')
         if not isinstance(self.encrypted, bool):
-            raise ProtocolError('encrypted must be bool')
+            raise ValueError('encrypted must be bool')
         if not isinstance(self.cluster, int):
-            raise ProtocolError('cluster_size must be int')
+            raise ValueError('cluster_size must be int')
         else:
             if not 0 <= self.cluster <= 65535:
-                raise ProtocolError('cluster_size requires 0 <= cluster_size <= 65535')
+                raise ValueError('cluster_size requires 0 <= cluster_size <= 65535')
 
     def as_dict(self) -> dict:
         return {
@@ -63,26 +75,26 @@ class Packet:
 
     def __post_init__(self):
         if not isinstance(self.flags, Flags):
-            raise ProtocolError('flags must be Flags')
+            raise ValueError('flags must be Flags')
 
         if not isinstance(self.command, (bytes, bytearray)):
-            raise ProtocolError('command must be bytes or bytearray')
+            raise ValueError('command must be bytes or bytearray')
         else:
             if self.command.__len__() > 32:
-                raise ProtocolError('command max length is 32 symbols')
+                raise ValueError('command max length is 32 bytes')
 
         self.checksum = sha1(self.data).digest()
 
         if not isinstance(self.data, bytes):
-            raise ProtocolError('data must be bytes')
+            raise ValueError('data must be bytes')
 
         if self.checksum_encrypted:
             if not isinstance(self.checksum_encrypted, bytes):
-                raise ProtocolError('checksum_encrypted must be bytes')
+                raise ValueError('checksum_encrypted must be bytes')
             elif not self.flags.encrypted:
-                raise ProtocolError('checksum_encrypted can be specified if packet is encrypted')
+                raise ValueError('checksum_encrypted can be specified if packet is encrypted')
             elif self.checksum_encrypted.__len__() > 20:
-                raise ProtocolError('checksum_encrypted max length is 20 symbols')
+                raise ValueError('checksum_encrypted max length is 20 symbols')
 
     def raw(self) -> bytes:
         return struct.pack(
@@ -114,7 +126,7 @@ class Protocol:
         elif key and isinstance(key, RSA.RsaKey) and key.has_private():
             self.key: RSA.RsaKey = key
         else:
-            raise ProtocolError('key must be RSA private key')
+            raise ValueError('key must be private RSA key')
 
     def pack(
             self,
@@ -125,22 +137,26 @@ class Protocol:
             type_: int = 0,
             key: RSA.RsaKey = None
     ) -> Packet:
-        if not(isinstance(type_, int) and 0 <= type_ <= 1):
-            raise ProtocolError('unsupported type')
+        if not(isinstance(type_, int) and 0 <= type_ <= 255):
+            raise ValueError('Unsupported type')
 
         if isinstance(command, str):
             command = command.encode('utf8')
         elif isinstance(command, bytearray):
             command = bytes(command)
+        elif isinstance(command, bytes):
+            pass
         else:
-            raise ProtocolError('Unsupported command type')
+            raise ValueError('Unsupported command type')
 
         if isinstance(data, str):
             data = data.encode('utf8')
         elif isinstance(data, bytearray):
             data = bytes(data)
+        elif isinstance(data, bytes):
+            pass
         else:
-            raise ProtocolError('Unsupported data type')
+            raise ValueError('Unsupported data type')
 
         if encrypt:
             cipher: PKCS1_OAEP.PKCS1OAEP_Cipher = PKCS1_OAEP.new(
@@ -161,16 +177,16 @@ class Protocol:
     def unpack(self, raw: Union[bytes, bytearray], key: RSA.RsaKey = None) -> Packet:
         if isinstance(raw, (bytes, bytearray)):
             if raw[:2] != INDICATOR:
-                raise ProtocolError('raw is not UCTP packet')
-            if raw[3] == __version__:
-                raise ProtocolError(f'UCTP packet version ({raw[3]}) is unsupported')
+                raise ProtocolError('Raw is not UCTP packet')
+            if raw[2] != __version__:
+                raise VersionError(f'UCTP packet version ({raw[2]}) is unsupported')
             if raw[39:59] != sha1(raw[59:]).digest():
-                raise ProtocolError('data is corrupted. bad checksum')
+                raise PacketError('Data is corrupted (Bad checksum)')
 
             try:
                 flags: Flags = Flags(*struct.unpack(PATTERN, raw[:59])[2:5])
             except struct.error:
-                raise ProtocolError('UCTP packet is corrupted')
+                raise DamageError('UCTP packet is damaged')
 
             if flags.encrypted:
                 cipher: PKCS1_OAEP.PKCS1OAEP_Cipher = PKCS1_OAEP.new(
@@ -185,7 +201,7 @@ class Protocol:
                         decrypted += cipher.decrypt(i)
                 except ValueError:
                     print(1)
-                    raise ProtocolError(f'encrypted data is corrupted')
+                    raise DamageError(f'Encrypted data is damaged')
 
             return Packet(
                 flags,
@@ -194,4 +210,4 @@ class Protocol:
                 raw[39:59] if flags.encrypted else None
             )
         else:
-            raise ProtocolError('raw must be bytes or bytearray')
+            raise ProtocolError('Raw must be bytes or bytearray')
