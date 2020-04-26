@@ -1,3 +1,9 @@
 __author__ = 'Timur Israpilov'
-__version__ = '1.0a.dev2'
-__maintainer__ = 'very1fake'
+__copyright__ = 'Copyright 2020, Timur Israpilov'
+__license__ = 'MIT'
+__version__ = '1.0.0a1'
+
+__all__ = ['protocol', 'peer']
+
+from . import protocol
+from . import peer
