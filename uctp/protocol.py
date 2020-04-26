@@ -27,11 +27,12 @@ class DamageError(Exception):
     pass
 
 
-INDICATOR = b'\x06\xa7'
+INDICATOR = b'\x3d\x01'
 PATTERN = '!HBB?H32s20s'
 
 TYPE_REQUEST = 0
 TYPE_RESPONSE = 1
+TYPE_ERROR = 2
 
 
 @dataclass
@@ -158,13 +159,21 @@ class Protocol:
         else:
             raise ValueError('Unsupported data type')
 
+        if not key:
+            pass
+        elif key and not isinstance(key, RSA.RsaKey):
+            raise TypeError('key must be RSA key')
+        else:
+            if not key.can_encrypt():
+                raise KeyError('key can not encrypt data')
+
         if encrypt:
             cipher: PKCS1_OAEP.PKCS1OAEP_Cipher = PKCS1_OAEP.new(
-                key if key and key.can_encrypt() else self.key,
+                key if key else self.key,
                 SHA3_256,
                 randfunc=Random.new().read
             )
-            chunk: int = self.key.size_in_bytes() - 66
+            chunk: int = (key.size_in_bytes() if key else self.key.size_in_bytes()) - 66
             encrypted = bytearray()
 
             for i in (data[i:i+chunk] for i in range(0, data.__len__(), chunk)):
@@ -172,7 +181,11 @@ class Protocol:
 
             data = bytes(encrypted)
 
-        return Packet(Flags(type_, encrypt, self.key.size_in_bytes() if encrypt else 0), command, data)
+        return Packet(
+            Flags(type_, encrypt, key.size_in_bytes() if key else self.key.size_in_bytes() if encrypt else 0),
+            command,
+            data
+        )
 
     def unpack(self, raw: Union[bytes, bytearray], key: RSA.RsaKey = None) -> Packet:
         if isinstance(raw, (bytes, bytearray)):
@@ -200,7 +213,6 @@ class Protocol:
                     for i in (raw[59:][i:i+chunk] for i in range(0, raw.__len__() - 59, chunk)):
                         decrypted += cipher.decrypt(i)
                 except ValueError:
-                    print(1)
                     raise DamageError(f'Encrypted data is damaged')
 
             return Packet(

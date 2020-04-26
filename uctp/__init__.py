@@ -1,3 +1,3 @@
-__version__ = '1.0a.dev1'
-__author__ = 'very1fake'
+__author__ = 'Timur Israpilov'
+__version__ = '1.0a.dev2'
 __maintainer__ = 'very1fake'

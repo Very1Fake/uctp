@@ -1,2 +1,2 @@
-# uctp
+# UCTP
 Universal Command Transfer Protocol
