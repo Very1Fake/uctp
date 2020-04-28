@@ -127,7 +127,7 @@ class Protocol:
         elif key and isinstance(key, RSA.RsaKey) and key.has_private():
             self.key: RSA.RsaKey = key
         else:
-            raise ValueError('key must be private RSA key')
+            raise TypeError('key must be private RSA key')
 
     def pack(
             self,
@@ -138,7 +138,7 @@ class Protocol:
             type_: int = 0,
             key: RSA.RsaKey = None
     ) -> Packet:
-        if not(isinstance(type_, int) and 0 <= type_ <= 255):
+        if not (isinstance(type_, int) and 0 <= type_ <= 255):
             raise ValueError('Unsupported type')
 
         if isinstance(command, str):
@@ -176,7 +176,7 @@ class Protocol:
             chunk: int = (key.size_in_bytes() if key else self.key.size_in_bytes()) - 66
             encrypted = bytearray()
 
-            for i in (data[i:i+chunk] for i in range(0, data.__len__(), chunk)):
+            for i in (data[i:i + chunk] for i in range(0, data.__len__(), chunk)):
                 encrypted += cipher.encrypt(i)
 
             data = bytes(encrypted)
@@ -210,7 +210,7 @@ class Protocol:
                 decrypted = bytearray()
 
                 try:
-                    for i in (raw[59:][i:i+chunk] for i in range(0, raw.__len__() - 59, chunk)):
+                    for i in (raw[59:][i:i + chunk] for i in range(0, raw.__len__() - 59, chunk)):
                         decrypted += cipher.decrypt(i)
                 except ValueError:
                     raise DamageError(f'Encrypted data is damaged')

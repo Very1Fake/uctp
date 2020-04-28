@@ -221,8 +221,8 @@ class Commands:
             def decorator(func):
                 params = inspect.getfullargspec(func)
 
-                returns = return_type if return_type else params.annotations['return'] if \
-                    'return' in params.annotations else type(None)
+                returns = Annotation(return_type) if return_type else Annotation(params.annotations['return']) if \
+                    'return' in params.annotations else Annotation()
 
                 if params.defaults:
                     defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
@@ -231,12 +231,12 @@ class Commands:
                 param_list: tuple = ()
 
                 if inspect.ismethod(func):
-                    del(params.args[0])
+                    del params.args[0]
 
                 peer = False
                 if len(params.args) > 0 and params.args[0] == 'peer':
                     peer = True
-                    del(params.args[0])
+                    del params.args[0]
 
                 for i in params.args:
                     param_list += (Parameter(
@@ -308,19 +308,20 @@ class Peer:
     listener: threading.Thread
     trusted: Trusted
 
+    timeout: float
+    auth_timeout: float
+    interval: float
+    max_connections: int
+
     IP: str
     PORT: int
-    TIMEOUT: float
-    AUTH_TIMEOUT: float
-    INTERVAL: float
-    MAX_CONNECTIONS: int
 
     def __init__(
             self,
             name: str,
             key: RSA.RsaKey,
             ip: str,
-            port: int = 426,
+            port: int = 2604,
             *,
             trusted: Trusted = None,
             aliases: Aliases = None,
@@ -362,19 +363,19 @@ class Peer:
         else:
             raise TypeError('aliases must be Aliases')
         if isinstance(timeout, (float, int)):
-            self.TIMEOUT = timeout
+            self.timeout = timeout
         else:
             raise TypeError('timeout must be float or int')
         if isinstance(auth_timeout, (float, int)):
-            self.AUTH_TIMEOUT = auth_timeout
+            self.auth_timeout = auth_timeout
         else:
             raise TypeError('auth_timeout must be float or int')
         if isinstance(max_connections, int):
-            self.MAX_CONNECTIONS = max_connections
+            self.max_connections = max_connections
         else:
             raise TypeError('max_connections must be int')
         if isinstance(interval, float):
-            self.INTERVAL = interval
+            self.interval = interval
         else:
             raise TypeError('interval must be float')
         self._protocol = protocol.Protocol(self._key)
@@ -419,6 +420,10 @@ class Peer:
     @property
     def name(self):
         return self._name
+
+    @property
+    def connections(self):
+        return self._connections
 
     @property
     def increment(self) -> int:
@@ -558,7 +563,7 @@ class Peer:
                 if i is self._server:
                     peer = self._server.accept()
 
-                    if self.MAX_CONNECTIONS < 0 or self._clients_count() >= self.MAX_CONNECTIONS:
+                    if self.max_connections < 0 or self._clients_count() >= self.max_connections:
                         peer[0].close()
                     else:
                         peer[0].setblocking(False)
@@ -654,7 +659,6 @@ class Peer:
                                                 f'Exception caught while executing command '
                                                 f'({e.__class__.__name__}: {e.__str__()})', encrypt
                                             )
-                                        raise e
                                 except (json.JSONDecodeError, ArgumentsError):
                                     packet = self._error(i, packet.command, 5, 'Wrong arguments', encrypt)
                         except NameError:
@@ -670,7 +674,7 @@ class Peer:
             expired: tuple = ()
             for i in self._connections:
                 if not self._connections[i].authorized and \
-                        self._connections[i].timestamp + self.AUTH_TIMEOUT < time.time() or \
+                        self._connections[i].timestamp + self.auth_timeout < time.time() or \
                         self._connections[i]._close or self._connections[i].socket._closed:
                     expired += (i,)
 
@@ -679,8 +683,8 @@ class Peer:
 
             delta = time.time() - start
 
-            if self.INTERVAL - delta > 0:
-                time.sleep(self.INTERVAL - delta)
+            if self.interval - delta > 0:
+                time.sleep(self.interval - delta)
 
     def connect(self, ip: str, port: int) -> bool:
         if self._state != 1:
@@ -694,7 +698,7 @@ class Peer:
             raise PeerError('illegal port to connect')
 
         connection = Connection(f'_{self.increment}', ip, port, socket.create_connection((ip, port), 8), False)
-        connection.socket.settimeout(self.TIMEOUT)
+        connection.socket.settimeout(self.timeout)
         type_, result = self._send(connection, self._protocol.pack(
             '_handshake', self._compile(self._name, self._key.publickey().export_key('DER').hex()), False))
 
@@ -781,7 +785,7 @@ class Peer:
     def run(self):
         if self._state != 1:
             self._state = 1
-            self._server.settimeout(self.TIMEOUT)
+            self._server.settimeout(self.timeout)
             self._server.bind((self.IP, self.PORT))
             self._server.listen()
             self.listener.start()

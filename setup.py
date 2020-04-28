@@ -20,12 +20,14 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Intended Audience :: Developers',
         'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python :: 3 :: Only',
         'Programming Language :: Python :: 3.8',
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Topic :: System :: Networking'
     ],
     python_requires='>=3.8',
-    install_requires=['pycryptodome==3.9.7'],
+    install_requires=['pycryptodome>=3.9.7'],
+    scripts=['bin/uctp'],
     include_package_data=True,
     zip_safe=False
 )
