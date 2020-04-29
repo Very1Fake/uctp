@@ -36,7 +36,7 @@ commands = parser.add_subparsers(title='commands', dest='command')
 connect = commands.add_parser('connect', help='Connect to peer and open shell')
 connect.add_argument('ip', help='ip of remote peer')
 connect.add_argument('-n', '--name', type=str, help='Name for peer')
-connect.add_argument('-p', '--port', nargs='?', type=int, help='port of remote peer')
+connect.add_argument('-p', '--port', nargs='?', default=2604, type=int, help='port of remote peer')
 connect.add_argument('-k', '--key', nargs='?', type=argparse.FileType('r', encoding='utf8'),
                      help='File with private RSA key. If not specified, key will be generated')
 
@@ -53,7 +53,7 @@ class Shell(cmd.Cmd):
     _peer: peer.Peer
     _history: str = os.path.expanduser('~/.uctp-cli-history')
 
-    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int = 2604):
+    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int):
         self._peer = peer.Peer(name, key_, '0.0.0.0', 0, max_connections=0)
         self._peer.run()
         self._peer.connect(ip, port)
@@ -180,7 +180,8 @@ def main():
                     Shell(
                         name,
                         key_,
-                        args.ip
+                        args.ip,
+                        args.port
                     ).start()
                     exit()
                 except Exception as e:
@@ -225,7 +226,7 @@ def main():
                             key_ = RSA.import_key(open(args.file, 'r').read())
                         except ValueError:
                             exit_('File has no RSA key')
-                        print(f'RSA key type: {"Public" if key_.has_private() else "Private"}\n'
+                        exit_(f'RSA key type: {"Public" if key_.has_private() else "Private"}\n'
                               f'RSA length: {key_.size_in_bits()}-bits ({key_.size_in_bytes()}-bytes)'
                               f'\nKey fingerprint:\n'
                               f'\tSHA1: {hashlib.sha1(key_.publickey().export_key("DER")).hexdigest().upper()}\n'
