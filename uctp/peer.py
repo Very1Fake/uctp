@@ -241,7 +241,7 @@ class Commands:
                 for i in params.args:
                     param_list += (Parameter(
                         i,
-                        Annotation(params.annotations[i]) if i in params.annotations else type(None),
+                        Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
                         defaults[i] if i in defaults else type(None)
                     ),)
 
