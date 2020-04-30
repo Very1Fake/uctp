@@ -1,5 +1,4 @@
 # TODO: Deny first symbol '_' for command name for user
-# TODO: Terminal client
 # TODO: Max connections response before kick
 # TODO: Fix error when select() without timeout
 # TODO: Go to SHA3_256
@@ -9,6 +8,7 @@ import errno
 import hashlib
 import inspect
 import json
+import math
 import queue
 import select
 import socket
@@ -105,6 +105,7 @@ class Aliases(dict):
                 additional.check_hash(k)
                 if not isinstance(v, str):
                     raise TypeError('value must be str')
+            dict_ = {k.lower(): v for k, v in dict_.items()}
         elif dict_ is None:
             dict_ = {}
         else:
@@ -115,26 +116,27 @@ class Aliases(dict):
         additional.check_hash(key)
         if not isinstance(value, str):
             raise TypeError('value must be str')
-        super().__setitem__(key, value)
+        super().__setitem__(key.lower(), value)
 
     def __getitem__(self, item: str) -> str:
         additional.check_hash(item)
-        return super().__getitem__(item)
+        return super().__getitem__(item.lower())
 
 
 class Trusted(list):
     def __init__(self, *args):
         for i in args:
             additional.check_hash(i)
+        args = [i.lower() for i in args]
         super().__init__(args)
 
     def __setitem__(self, key, hash_: str):
         additional.check_hash(hash_)
-        super().__setitem__(key, hash_)
+        super().__setitem__(key, hash_.lower())
 
     def append(self, hash_: str) -> None:
         additional.check_hash(hash_)
-        super().append(hash_)
+        super().append(hash_.lower())
 
 
 @dataclass
@@ -146,7 +148,7 @@ class Connection:
     client: bool
     authorized: bool = field(default=False)
     _key: RSA.RsaKey = field(init=False, default=None)
-    _close: bool = field(init=False, default=False)
+    _to_close: bool = field(init=False, default=False)
     lock: threading.Lock = field(init=False)
     timestamp: float = field(init=False)
     session: str = field(init=False)
@@ -172,6 +174,10 @@ class Connection:
             else:
                 raise TypeError('key must be public RSA key')
 
+    @property
+    def to_close(self) -> bool:
+        return self._to_close
+
     def key_hash(self) -> str:
         if self.key:
             return hashlib.sha1(self.key.export_key('DER')).hexdigest()
@@ -182,7 +188,7 @@ class Connection:
         return self.socket.fileno()
 
     def close(self):
-        self._close = True
+        self._to_close = True
 
     def export(self) -> dict:
         return {
@@ -201,66 +207,74 @@ class Commands:
     def __init__(self):
         self.storage: dict = {}
 
-    def add(
+    def add_(
             self,
-            name: str,
-            return_type: Type[Any] = None,
-            *,
+            func,
+            name: str = '',
+            returns: Type[Any] = None,
             protected: bool = True,
             encrypt: bool = True
     ):
-        if isinstance(name, str):
-            if len(name.encode()) > 32:
-                raise protocol.ProtocolError('Command max length is 32 bytes')
-        else:
+        if not isinstance(name, str):
             raise TypeError('name must be str')
-        if return_type and not isinstance(return_type, type) and return_type is not Any:
+        if returns and not isinstance(returns, type) and returns is not Any:
             raise TypeError('returns must be type')
 
-        if name not in self.storage:
-            def decorator(func):
-                params = inspect.getfullargspec(func)
+        name_ = name if name else func.__name__
+        params = inspect.getfullargspec(func)
+        returns_ = Annotation(returns) if returns else Annotation(params.annotations['return']) if \
+            'return' in params.annotations else Annotation()
 
-                returns = Annotation(return_type) if return_type else Annotation(params.annotations['return']) if \
-                    'return' in params.annotations else Annotation()
-
-                if params.defaults:
-                    defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
-                else:
-                    defaults = {}
-                param_list: tuple = ()
-
-                if inspect.ismethod(func):
-                    del params.args[0]
-
-                peer = False
-                if len(params.args) > 0 and params.args[0] == 'peer':
-                    peer = True
-                    del params.args[0]
-
-                for i in params.args:
-                    param_list += (Parameter(
-                        i,
-                        Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
-                        defaults[i] if i in defaults else type(None)
-                    ),)
-
-                self.storage[name] = {
-                    'func': func,
-                    'params': {
-                        'list': param_list,
-                        'args': True if params.varargs else False,
-                        'kwargs': True if params.varkw else False,
-                        'peer': peer
-                    },
-                    'returns': returns,
-                    'protected': protected,
-                    'encrypt': encrypt
-                }
-
-            return decorator
-        else:
+        if name_ in self.storage:
             raise IndexError('Command with this name already exists')
+
+        if params.defaults:
+            defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
+        else:
+            defaults = {}
+        param_list: tuple = ()
+
+        if inspect.ismethod(func):
+            del params.args[0]
+
+        peer = False
+        if len(params.args) > 0 and params.args[0] == 'peer':
+            peer = True
+            del params.args[0]
+
+        for i in params.args:
+            param_list += (Parameter(
+                i,
+                Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
+                defaults[i] if i in defaults else type(None)
+            ),)
+
+        self.storage[name_] = {
+            'func': func,
+            'params': {
+                'list': param_list,
+                'args': True if params.varargs else False,
+                'kwargs': True if params.varkw else False,
+                'peer': peer
+            },
+            'returns': returns_,
+            'protected': protected,
+            'encrypt': encrypt
+        }
+
+    def add(
+            self,
+            name: str = '',
+            returns: Type[Any] = None,
+            protected: bool = True,
+            encrypt: bool = True
+    ):
+        def decorator(func):
+            if inspect.ismethod(func):
+                raise TypeError('Decorator cannot be used for methods. Use add_() instead')
+            self.add_(func, name, returns, protected, encrypt)
+
+        return decorator
 
     def get(self, name: str) -> dict:
         if name in self.storage:
@@ -378,8 +392,13 @@ class Peer:
             self.interval = interval
         else:
             raise TypeError('interval must be float')
+        if isinstance(buffer, int):
+            if buffer < 128:
+                raise ValueError('buffer cannot be less than 128')
+            self.buffer = buffer
+        else:
+            raise TypeError('buffer must be int')
         self._protocol = protocol.Protocol(self._key)
-        self.buffer = buffer
         self._increment = 0
 
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -390,14 +409,16 @@ class Peer:
         self.commands = Commands()
         self.listener = threading.Thread(target=self.listener_loop, daemon=True)
 
-        self.commands.add('_handshake', dict, protected=False, encrypt=False)(self._handshake)
-        self.commands.add('_auth', int, protected=False)(self._auth)
-        self.commands.add('_commands', dict)(self._commands)
-        self.commands.add('_ping', str)(self._ping)
-        self.commands.add('_echo', Any)(self._echo)
-        self.commands.add('_me', dict)(self._me)
-        self.commands.add('_peers', list)(self._peers)
-        self.commands.add('_close', bool)(self._close)
+        self.commands.add_(self._handshake, protected=False, encrypt=False)
+        self.commands.add_(self._auth, protected=False)
+        self.commands.add_(self._commands)
+        self.commands.add_(self._ping)
+        self.commands.add_(self._echo, returns=Any)
+        self.commands.add_(self._me)
+        self.commands.add_(self._peers)
+        self.commands.add_(self._trusted)
+        self.commands.add_(self._aliases)
+        self.commands.add_(self._close)
 
     @property
     def buffer(self):
@@ -505,23 +526,48 @@ class Peer:
                 count += 1
         return count
 
+    def _recv(self, socket_: socket.socket) -> bytes:
+        try:
+            data = socket_.recv(self.buffer)
+        except socket.error as e:
+            if e.errno is errno.ECONNRESET:
+                data = None
+            else:
+                raise e
+        return data
+
+    def _receive(self, socket_: socket.socket) -> bytearray:
+        try:
+            data = bytearray(self._recv(socket_))
+
+            if data:
+                header: protocol.Header = self._protocol.unpack_header(data)
+
+                if self._protocol.remained_data_size(len(data), header.flags.size) > 0:
+                    for i in range(
+                            math.ceil(self._protocol.remained_data_size(len(data), header.flags.size) / self.buffer)):
+                        data.extend(self._recv(socket_))
+            return data
+        except TypeError:
+            return bytearray()
+
     def _send(self, peer: Connection, packet: protocol.Packet) -> Tuple[int, Any]:
         if peer.lock.acquire():
             try:
                 peer.socket.setblocking(True)
                 peer.socket.sendall(packet.raw())
 
-                data = peer.socket.recv(self.buffer)
+                data = self._receive(peer.socket)
                 if data:
                     try:
                         packet_ = self._protocol.unpack(data)
 
-                        if packet_.flags.type == 0 or packet_.flags.type > 2:
+                        if packet_.header.flags.type == 0 or packet_.header.flags.type > 2:
                             raise TypeError('Unexpected packet type')
-                        elif packet_.command != packet.command:
+                        elif packet_.header.command != packet.header.command:
                             raise protocol.PacketError('Unexpected response')
 
-                        type_ = packet_.flags.type
+                        type_ = packet_.header.flags.type
 
                         try:
                             packet_ = json.loads(packet_.data)
@@ -530,10 +576,10 @@ class Peer:
                         finally:
                             return type_, packet_
                     except protocol.ProtocolError:
-                        raise protocol.ProtocolError(f'peer {peer.ip}:{peer.port} doesn\'t support uctp protocol')
+                        raise protocol.ProtocolError(f'peer {peer.ip}:{peer.port} does not support uctp protocol')
                     except protocol.VersionError:
                         raise protocol.VersionError(
-                            f'peer {peer.ip}:{peer.port} doesn\'t support current version of protocol')
+                            f'peer {peer.ip}:{peer.port} does not support current version of protocol')
                     except protocol.PacketError:
                         raise protocol.PacketError(f'corrupted data received from peer {peer.ip}:{peer.port}')
                 else:
@@ -577,13 +623,7 @@ class Peer:
                         )
                 else:
                     if i.lock.acquire(False):
-                        try:
-                            data = i.socket.recv(self.buffer)
-                        except socket.error as e:
-                            if e.errno is errno.ECONNRESET:
-                                data = None
-                            else:
-                                raise e
+                        data = self._receive(i.socket)
 
                         if data:
                             try:
@@ -591,7 +631,13 @@ class Peer:
                                 if self._state == 1:
                                     i.messages.put(data)
                                 elif self._state == 2:
-                                    i.messages.put(self._error(i, data.command, 0, 'Peer shuts down', bool(i.key)))
+                                    i.messages.put(self._error(
+                                        i,
+                                        data.header.command,
+                                        0,
+                                        'Peer shuts down',
+                                        bool(i.key)
+                                    ))
                                 i.lock.release()
                             except protocol.ProtocolError:
                                 self.disconnect(i.name)
@@ -604,11 +650,11 @@ class Peer:
                 if i.lock.acquire(False):
                     packet: protocol.Packet = i.messages.get_nowait()
 
-                    if packet.flags.type == protocol.TYPE_REQUEST:
+                    if packet.header.flags.type == protocol.TYPE_REQUEST:
                         try:
-                            encrypt = self.commands.get(packet.command.decode())['encrypt']
-                            if self.commands.get(packet.command.decode())['protected'] and not i.authorized:
-                                packet = self._error(i, packet.command, 1, 'Access denied', encrypt)
+                            encrypt = self.commands.get(packet.header.command.decode())['encrypt']
+                            if self.commands.get(packet.header.command.decode())['protected'] and not i.authorized:
+                                packet = self._error(i, packet.header.command, 1, 'Access denied', encrypt)
                             else:
                                 args: list = []
                                 kwargs: dict = {}
@@ -632,10 +678,15 @@ class Peer:
                                             kwargs.update(argv[1])
 
                                     try:
-                                        result = self.commands.execute(i, packet.command.decode(), *args, **kwargs)[1]
+                                        result = self.commands.execute(
+                                            i,
+                                            packet.header.command.decode(),
+                                            *args,
+                                            **kwargs
+                                        )[1]
                                         try:
                                             packet = self._protocol.pack(
-                                                packet.command,
+                                                packet.header.command,
                                                 json.dumps(result),
                                                 encrypt,
                                                 type_=1,
@@ -643,28 +694,28 @@ class Peer:
                                             )
                                         except json.JSONDecodeError:
                                             packet = self._error(
-                                                i, packet.command, 2,
-                                                'Command tried to return objects that json doesn\'t support', encrypt
+                                                i, packet.header.command, 2,
+                                                'Command tried to return objects that json does not support', encrypt
                                             )
                                     except Exception as e:
                                         if isinstance(e, _PassException):
                                             if isinstance(e.extract, NameError):
                                                 packet = self._error(
-                                                    i, packet.command, 3,
+                                                    i, packet.header.command, 3,
                                                     e.extract.__str__(), encrypt
                                                 )
                                         else:
                                             packet = self._error(
-                                                i, packet.command, 4,
+                                                i, packet.header.command, 4,
                                                 f'Exception caught while executing command '
                                                 f'({e.__class__.__name__}: {e.__str__()})', encrypt
                                             )
                                 except (json.JSONDecodeError, ArgumentsError):
-                                    packet = self._error(i, packet.command, 5, 'Wrong arguments', encrypt)
+                                    packet = self._error(i, packet.header.command, 5, 'Wrong arguments', encrypt)
                         except NameError:
-                            packet = self._error(i, packet.command, 6, 'Command not found', i.authorized)
+                            packet = self._error(i, packet.header.command, 6, 'Command not found', i.authorized)
                     else:
-                        packet = self._error(i, packet.command, 7, 'Unexpected packet type', i.authorized)
+                        packet = self._error(i, packet.header.command, 7, 'Unexpected packet type', i.authorized)
                     i.socket.send(packet.raw())
                     i.lock.release()
 
@@ -675,7 +726,7 @@ class Peer:
             for i in self._connections:
                 if not self._connections[i].authorized and \
                         self._connections[i].timestamp + self.auth_timeout < time.time() or \
-                        self._connections[i]._close or self._connections[i].socket._closed:
+                        self._connections[i].to_close or self._connections[i].socket._closed:
                     expired += (i,)
 
             for i in expired:
@@ -824,8 +875,8 @@ class Peer:
         else:
             return {'access': False}
 
-    def _auth(self, peer: Connection, answers: str) -> bool:
-        if answers == peer.session and not self.trusted or peer.session in self.trusted:
+    def _auth(self, peer: Connection, answer: str) -> bool:
+        if answer == peer.session and not self.trusted or peer.key_hash() in self.trusted:
             peer.authorized = True
             return True
         else:
@@ -849,6 +900,13 @@ class Peer:
     def _peers(self) -> list:
         return [i.export() for i in self._connections.values()]
 
-    def _close(self, peer: Connection) -> bool:
+    def _trusted(self) -> list:
+        return self.trusted
+
+    def _aliases(self) -> dict:
+        return self.aliases
+
+    @staticmethod
+    def _close(peer: Connection) -> bool:
         peer.close()
         return True

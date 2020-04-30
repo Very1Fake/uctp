@@ -1,4 +1,4 @@
-# TODO: Add kwargs to send()
+# TODO: Format some commands response
 
 import argparse
 import atexit
@@ -110,6 +110,8 @@ class Shell(cmd.Cmd):
         try:
             if line[0] == '/':
                 line = 'send ' + line[1:]
+            elif line[0] == '!':
+                line = 'fsend ' + line[1:]
         finally:
             return line
 
@@ -118,13 +120,17 @@ class Shell(cmd.Cmd):
 
     @staticmethod
     def do_clear(args: str):
-        """Clear screen"""
+        """
+        Clear screen
+        """
         os.system('clear')
 
     def do_send(self, line: str):
-        """Send command to remote peer\nSyntax: send <command> [args]\n* Instead of \"send\" you can use \"/\""""
-        self.check()
-
+        """
+        Send command to remote peer
+        Syntax: send <command> [args]
+        * Instead of \"send\" you can use \"/\"
+        """
         command = line.split(' ')[0]
         args = []
         buffer = []
@@ -148,16 +154,41 @@ class Shell(cmd.Cmd):
                         args.append(i)
 
             try:
-                print(f'\nResponse:\n{self._peer.send(self.connected()[1], command, args)[1]}\n')
+                print(f'\n{self._peer.send(self.connected()[1], command, args)[1]}\n')
             except Exception as e:
                 print(f'{e.__class__.__name__}: {e.__str__()}')
         except json.JSONDecodeError as e:
             print('Error while parsing arguments')
             raise e
 
+    def do_fsend(self, line: str):
+        """
+        Send command to remote peer
+        Syntax: send <command> string
+        * string will be parsed as JSON (if string will be dict, it will be sent as kwargs)
+        """
+
+        command, sep, string = line.partition(' ')
+
+        try:
+            string = json.loads(string)
+            if isinstance(string, dict):
+                result = self._peer.send(self.connected()[1], command, kwargs=string)[1]
+            elif isinstance(string, list):
+                result = self._peer.send(self.connected()[1], command, string)[1]
+            else:
+                result = self._peer.send(self.connected()[1], command, (string,))[1]
+            print(f'\n{result}\n')
+        except json.JSONDecodeError:
+            print('Error while parsing (JSON)')
+        except Exception as e:
+            print(f'{e.__class__.__name__}: {e.__str__()}')
+
     @staticmethod
     def do_exit(args: str):
-        """Close connection with remote peer and exit"""
+        """
+        Close connection with remote peer and exit
+        """
         return True
 
 
@@ -213,9 +244,9 @@ def main():
                                 f.write(key_.export_key())
                                 print('Generating complete')
                                 exit_(f'Key fingerprint:\n\tSHA1: '
-                                      f'{hashlib.sha1(key_.publickey().export_key("DER")).hexdigest().upper()}'
+                                      f'{hashlib.sha1(key_.publickey().export_key("DER")).hexdigest()}'
                                       f'\n\tSHA256: '
-                                      f'{hashlib.sha256(key_.publickey().export_key("DER")).hexdigest().upper()}')
+                                      f'{hashlib.sha256(key_.publickey().export_key("DER")).hexdigest()}')
                         except OSError:
                             exit_('Wrong file path')
                         except KeyboardInterrupt:
@@ -229,8 +260,8 @@ def main():
                         exit_(f'RSA key type: {"Public" if key_.has_private() else "Private"}\n'
                               f'RSA length: {key_.size_in_bits()}-bits ({key_.size_in_bytes()}-bytes)'
                               f'\nKey fingerprint:\n'
-                              f'\tSHA1: {hashlib.sha1(key_.publickey().export_key("DER")).hexdigest().upper()}\n'
-                              f'\tSHA256: {hashlib.sha256(key_.publickey().export_key("DER")).hexdigest().upper()}'
+                              f'\tSHA1: {hashlib.sha1(key_.publickey().export_key("DER")).hexdigest()}\n'
+                              f'\tSHA256: {hashlib.sha256(key_.publickey().export_key("DER")).hexdigest()}'
                               f'\nCan be used for uctp: {"Yes" if key_.has_private() else "No"}')
                     else:
                         exit_('File doesn\'t exist')
