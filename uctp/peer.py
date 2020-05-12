@@ -60,6 +60,9 @@ class Annotation:
     def __init__(self, annotation: Type[Any] = type(None)):
         if not isinstance(annotation, type) and annotation is not Any:
             raise TypeError('annotation must be type')
+        elif annotation not in (int, float, bool, str, list, dict, Any, type(None)):
+            raise TypeError(
+                'Only int, float, bool, str, list, dict, NoneType, typing.Any types are supported as annotation')
 
         self.type_ = annotation
 
@@ -70,9 +73,9 @@ class Annotation:
     def str(annotation: Type[Any]):
         if isinstance(annotation, type) or annotation is Any:
             if annotation is Any:
-                return 'any'
-            elif isinstance(annotation, type(None)):
-                return 'none'
+                return 'Any'
+            elif annotation == type(None):
+                return 'None'
             else:
                 return annotation.__name__
         else:
@@ -86,16 +89,15 @@ class Parameter:
     default: Any = None
 
     def __post_init__(self):
-        if isinstance(self.name, str):
-            if self.name.__len__() > 32:
-                raise ValueError('Name length must be less than 32')
-        else:
-            raise TypeError('Name must be str')
+        if not isinstance(self.name, str):
+            raise TypeError('name must be str')
         if not isinstance(self.annotation, Annotation):
             raise TypeError('annotation must be Annotation')
+        if not isinstance(self.default, (int, float, bool, str, list, dict, type(None))):
+            raise TypeError('Only int, float, bool, str, list, dict, NoneType types are supported as default value')
 
-    def export(self) -> tuple:
-        return self.name, str(self.annotation), True if self.default else False
+    def export(self) -> list:
+        return [self.name, str(self.annotation), self.default]
 
 
 class Aliases(dict):
@@ -195,6 +197,7 @@ class Connection:
             'name': self.name,
             'ip': self.ip,
             'port': self.port,
+            'client': self.client,
             'key': self.key_hash(),
             'timestamp': self.timestamp,
             'session': self.session,
@@ -232,7 +235,8 @@ class Commands:
             defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
         else:
             defaults = {}
-        param_list: tuple = ()
+        args_list: list = []
+        kwargs_list: list = []
 
         if inspect.ismethod(func):
             del params.args[0]
@@ -243,20 +247,26 @@ class Commands:
             del params.args[0]
 
         for i in params.args:
-            param_list += (Parameter(
+            args_list.append(Parameter(
                 i,
                 Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
-                defaults[i] if i in defaults else type(None)
-            ),)
+                defaults[i] if i in defaults else None
+            ))
+
+        for i in params.kwonlyargs:
+            kwargs_list.append(Parameter(
+                i,
+                Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
+                params.kwonlydefaults[i] if i in params.kwonlydefaults else None
+            ))
 
         self.storage[name_] = {
             'func': func,
-            'params': {
-                'list': param_list,
-                'args': True if params.varargs else False,
-                'kwargs': True if params.varkw else False,
-                'peer': peer
-            },
+            'args': args_list,
+            'kwargs': kwargs_list,
+            'varargs': params.varargs if params.varargs else '',
+            'varkw': params.varkw if params.varkw else '',
+            'peer': peer,
             'returns': returns_,
             'protected': protected,
             'encrypt': encrypt
@@ -282,29 +292,63 @@ class Commands:
         else:
             raise NameError('Command not found')
 
-    def execute(self, peer: Connection, name: str, *args: tuple, **kwargs: dict) -> Tuple[bool, Any]:
+    def execute(self, peer: Connection, name: str, *args, **kwargs) -> Tuple[bool, Any]:
         if name in self.storage:
-            if self.storage[name]['params']['peer']:
-                return True, self.storage[name]['func'](peer, *args, **kwargs)
+            command: dict = self.storage[name]
+            args: list = list(args)
+
+            for k, v in enumerate(args[:len(command['args'])]):
+                if not isinstance(v, type_ := command['args'][k].annotation.type_):
+                    try:
+                        if type_ in (int, float, str):
+                            args[k] = type_(v)
+                        elif type_ in (list, dict):
+                            args[k] = json.loads(v)
+                        elif type_ is bool:
+                            if v in ('false', 'False'):
+                                args[k] = False
+                            else:
+                                args[k] = bool(v)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+
+            for k, v in kwargs.items():
+                print(command['kwargs'], k)
+                if k in command['kwargs'] and not isinstance(v, type_ := command['kwargs'][k].annotation.type_):
+                    try:
+                        if not isinstance(v, type_):
+                            if type_ in (int, float, str):
+                                kwargs[k] = type_(v)
+                            elif type_ in (list, dict):
+                                kwargs[k] = json.loads(v)
+                            elif type_ is bool:
+                                if v in ('false', 'False', 'no', 'No', 'null', 'Null', 'none', 'None'):
+                                    kwargs[k] = False
+                                else:
+                                    kwargs[k] = bool(v)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
+
+            if command['peer']:
+                return True, command['func'](peer, *args, **kwargs)
             else:
-                return True, self.storage[name]['func'](*args, **kwargs)
+                return True, command['func'](*args, **kwargs)
         else:
             return False, None
 
-    def export(self) -> str:
+    def export(self) -> dict:
         snapshot = {}
         for k, v in self.storage.items():
             snapshot[k] = {
-                'params': {
-                    'list': tuple(i.export() for i in v['params']['list']),
-                    'args': v['params']['args'],
-                    'kwargs': v['params']['kwargs']
-                },
+                'args': [i.export() for i in v['args']],
+                'kwargs': [i.export() for i in v['kwargs']],
+                'varargs': v['varargs'],
+                'varkw': v['varkw'],
                 'returns': str(v['returns']),
                 'protected': v['protected'],
                 'encrypt': v['encrypt']
             }
-        return json.dumps(snapshot)
+        return snapshot
 
 
 class Peer:
@@ -594,11 +638,11 @@ class Peer:
         while self._state > 0:
             start = time.time()
 
-            readers: tuple = (self._server,)
+            readers: list = [self._server]
             for i in self._connections.values():
-                readers += (i,)
+                readers.append(i)
 
-            writers: tuple = tuple(i for i in self._connections.values() if not i.messages.empty())
+            writers: list = [i for i in self._connections.values() if not i.messages.empty()]
 
             if self._state == 2 and not writers:
                 self._state = 0
@@ -722,12 +766,12 @@ class Peer:
             for i in exceptional:
                 self.disconnect(i)
 
-            expired: tuple = ()
+            expired: list = []
             for i in self._connections:
                 if not self._connections[i].authorized and \
                         self._connections[i].timestamp + self.auth_timeout < time.time() or \
                         self._connections[i].to_close or self._connections[i].socket._closed:
-                    expired += (i,)
+                    expired.append(i)
 
             for i in expired:
                 self.disconnect(i)
@@ -803,7 +847,7 @@ class Peer:
             name: str,
             command: str,
             /,
-            args: Union[tuple, list] = (),
+            args: Union[list, tuple] = (),
             kwargs: dict = None,
             *,
             raise_: bool = True
@@ -813,8 +857,8 @@ class Peer:
         elif not self._connections[name].authorized:
             raise AccessError(f'"{name}" is unauthorized peer')
 
-        if args and not isinstance(args, (tuple, list)):
-            raise TypeError('args must be tuple or list')
+        if args and not isinstance(args, (list, tuple)):
+            raise TypeError('args must be list or tuple')
         if kwargs and not isinstance(kwargs, dict):
             raise TypeError('kwargs must be dict')
 
@@ -845,7 +889,7 @@ class Peer:
         if self._state == 1:
             self._state = 2
             self.listener.join()
-            for i in tuple(self._connections):
+            for i in list(self._connections):
                 self.disconnect(i)
             self._server.close()
 
