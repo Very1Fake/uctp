@@ -10,6 +10,7 @@ import random
 import readline
 import sys
 import textwrap
+from datetime import datetime
 from typing import Union, Tuple
 
 from Crypto.PublicKey import RSA
@@ -36,9 +37,10 @@ commands = parser.add_subparsers(title='commands', dest='command')
 connect = commands.add_parser('connect', help='Connect to peer and open shell')
 connect.add_argument('ip', help='ip of remote peer')
 connect.add_argument('-n', '--name', type=str, help='Name for peer')
-connect.add_argument('-p', '--port', nargs='?', default=2604, type=int, help='port of remote peer')
+connect.add_argument('-p', '--port', nargs='?', default=2604, type=int, help='Port of remote peer')
 connect.add_argument('-k', '--key', nargs='?', type=argparse.FileType('r', encoding='utf8'),
                      help='File with private RSA key. If not specified, key will be generated')
+connect.add_argument('-r', '--raw', action='store_true', help='Print raw data of response')
 
 key = commands.add_parser('key', help='Key generator and validator')
 key.add_argument('file', type=str, help='Path to file that stores RSA key')
@@ -53,10 +55,14 @@ class Shell(cmd.Cmd):
     _peer: peer.Peer
     _history: str = os.path.expanduser('~/.uctp-cli-history')
 
-    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int):
+    raw: bool
+
+    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int, raw_output: bool = False):
         self._peer = peer.Peer(name, key_, '0.0.0.0', 0, max_connections=0)
         self._peer.run()
         self._peer.connect(ip, port)
+
+        self.raw = raw_output
 
         readline.set_history_length(100)
 
@@ -64,6 +70,42 @@ class Shell(cmd.Cmd):
         self.doc_header = 'Documented commands (type "help <command>" to see help):'
         self.nohelp = '- No help for this command "%s"'
         super().__init__()
+
+    def _print(self, command: str, result) -> None:
+        output = ''
+        if not self.raw:
+            if command == '_commands':
+                commands_ = []
+                for k, v in result.items():
+                    commands_.append('{0}({1}) -> {2}'.format(
+                        k,
+                        ', '.join(
+                            [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
+                             f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['args']] +
+                            (['*'] if v['kwargs'] else []) +
+                            [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
+                             f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['kwargs']] +
+                            ([f'*{v["varargs"]}'] if v['varargs'] else []) + ([f'**{v["varkw"]}'] if v['varkw'] else [])
+                        ),
+                        v['returns']
+                    ))
+                output = '\n'.join(commands_)
+            elif command == '_me':
+                output = f'Name: {result["name"]}\nAddress: {result["ip"]}:{result["port"]}\nConnected: ' \
+                         f'{datetime.utcfromtimestamp(result["timestamp"]).isoformat()}\nKey (SHA1): ' \
+                         f'{result["key"]}\nSession: {result["session"]}'
+            elif command == '_peers':
+                output = '\n'.join([
+                    f'{i["name"]} Key (SHA1): {i["key"]}, Session: {i["session"]}\n{"":>{len(i["name"])}} '
+                    f'Address: {i["ip"]}:{i["port"]}, Connected: '
+                    f'{datetime.utcfromtimestamp(i["timestamp"]).isoformat()}{" (client)" if i["client"] else ""}'
+                    for i in result
+                ])
+            elif command == '_trusted':
+                output = ', '.join(result)
+            elif command == '_aliases':
+                output = '\n'.join([f'{v}: {k}' for k, v in result.items()])
+        print(f'\n{output if output else result}\n')
 
     def connected(self) -> Tuple[bool, Union[str, type(None)]]:
         try:
@@ -154,12 +196,16 @@ class Shell(cmd.Cmd):
                         args.append(i)
 
             try:
-                print(f'\n{self._peer.send(self.connected()[1], command, args)[1]}\n')
+                status, result = self._peer.send(self.connected()[1], command, args)
+
+                if status == 1:
+                    self._print(command, result)
+                else:
+                    print(f'\n{result}\n')
             except Exception as e:
-                print(f'{e.__class__.__name__}: {e.__str__()}')
-        except json.JSONDecodeError as e:
+                print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
+        except json.JSONDecodeError:
             print('Error while parsing arguments')
-            raise e
 
     def do_fsend(self, line: str):
         """
@@ -173,16 +219,19 @@ class Shell(cmd.Cmd):
         try:
             string = json.loads(string)
             if isinstance(string, dict):
-                result = self._peer.send(self.connected()[1], command, kwargs=string)[1]
+                status, result = self._peer.send(self.connected()[1], command, kwargs=string)
             elif isinstance(string, list):
-                result = self._peer.send(self.connected()[1], command, string)[1]
+                status, result = self._peer.send(self.connected()[1], command, string)
             else:
-                result = self._peer.send(self.connected()[1], command, (string,))[1]
-            print(f'\n{result}\n')
+                status, result = self._peer.send(self.connected()[1], command, (string,))
+            if status == 1:
+                self._print(command, result)
+            else:
+                print(f'\n{result}\n')
         except json.JSONDecodeError:
             print('Error while parsing (JSON)')
         except Exception as e:
-            print(f'{e.__class__.__name__}: {e.__str__()}')
+            print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
 
     @staticmethod
     def do_exit(args: str):
@@ -212,7 +261,8 @@ def main():
                         name,
                         key_,
                         args.ip,
-                        args.port
+                        args.port,
+                        args.raw
                     ).start()
                     exit()
                 except Exception as e:

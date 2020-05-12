@@ -73,9 +73,9 @@ class Annotation:
     def str(annotation: Type[Any]):
         if isinstance(annotation, type) or annotation is Any:
             if annotation is Any:
-                return 'any'
-            elif isinstance(annotation, type(None)):
-                return 'none'
+                return 'Any'
+            elif annotation == type(None):
+                return 'None'
             else:
                 return annotation.__name__
         else:
@@ -96,8 +96,8 @@ class Parameter:
         if not isinstance(self.default, (int, float, bool, str, list, dict, type(None))):
             raise TypeError('Only int, float, bool, str, list, dict, NoneType types are supported as default value')
 
-    def export(self) -> tuple:
-        return self.name, str(self.annotation), self.default
+    def export(self) -> list:
+        return [self.name, str(self.annotation), self.default]
 
 
 class Aliases(dict):
@@ -197,6 +197,7 @@ class Connection:
             'name': self.name,
             'ip': self.ip,
             'port': self.port,
+            'client': self.client,
             'key': self.key_hash(),
             'timestamp': self.timestamp,
             'session': self.session,
@@ -297,34 +298,36 @@ class Commands:
             args: list = list(args)
 
             for k, v in enumerate(args[:len(command['args'])]):
-                type_ = command['args'][k].annotation.type_
-                try:
-                    if type_ in (int, float, str):
-                        args[k] = type_(v)
-                    elif type_ in (list, dict):
-                        args[k] = json.loads(v)
-                    elif type_ is bool:
-                        if v in ('false', 'False'):
-                            args[k] = False
-                        else:
-                            args[k] = bool(v)
-                except (ValueError, json.JSONDecodeError):
-                    continue
+                if not isinstance(v, type_ := command['args'][k].annotation.type_):
+                    try:
+                        if type_ in (int, float, str):
+                            args[k] = type_(v)
+                        elif type_ in (list, dict):
+                            args[k] = json.loads(v)
+                        elif type_ is bool:
+                            if v in ('false', 'False'):
+                                args[k] = False
+                            else:
+                                args[k] = bool(v)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
 
             for k, v in kwargs.items():
-                type_ = command['kwargs'][k].annotation.type_
-                try:
-                    if type_ in (int, float, str):
-                        kwargs[k] = type_[k](v)
-                    elif type_ in (list, dict):
-                        kwargs[k] = json.loads(v)
-                    elif type_ is bool:
-                        if v in ('false', 'False'):
-                            kwargs[k] = False
-                        else:
-                            kwargs[k] = bool(v)
-                except (ValueError, json.JSONDecodeError):
-                    continue
+                print(command['kwargs'], k)
+                if k in command['kwargs'] and not isinstance(v, type_ := command['kwargs'][k].annotation.type_):
+                    try:
+                        if not isinstance(v, type_):
+                            if type_ in (int, float, str):
+                                kwargs[k] = type_(v)
+                            elif type_ in (list, dict):
+                                kwargs[k] = json.loads(v)
+                            elif type_ is bool:
+                                if v in ('false', 'False', 'no', 'No', 'null', 'Null', 'none', 'None'):
+                                    kwargs[k] = False
+                                else:
+                                    kwargs[k] = bool(v)
+                    except (ValueError, json.JSONDecodeError):
+                        continue
 
             if command['peer']:
                 return True, command['func'](peer, *args, **kwargs)
@@ -333,7 +336,7 @@ class Commands:
         else:
             return False, None
 
-    def export(self) -> str:
+    def export(self) -> dict:
         snapshot = {}
         for k, v in self.storage.items():
             snapshot[k] = {
@@ -345,7 +348,7 @@ class Commands:
                 'protected': v['protected'],
                 'encrypt': v['encrypt']
             }
-        return json.dumps(snapshot)
+        return snapshot
 
 
 class Peer:
@@ -635,11 +638,11 @@ class Peer:
         while self._state > 0:
             start = time.time()
 
-            readers: tuple = (self._server,)
+            readers: list = [self._server]
             for i in self._connections.values():
-                readers += (i,)
+                readers.append(i)
 
-            writers: tuple = tuple(i for i in self._connections.values() if not i.messages.empty())
+            writers: list = [i for i in self._connections.values() if not i.messages.empty()]
 
             if self._state == 2 and not writers:
                 self._state = 0
@@ -763,12 +766,12 @@ class Peer:
             for i in exceptional:
                 self.disconnect(i)
 
-            expired: tuple = ()
+            expired: list = []
             for i in self._connections:
                 if not self._connections[i].authorized and \
                         self._connections[i].timestamp + self.auth_timeout < time.time() or \
                         self._connections[i].to_close or self._connections[i].socket._closed:
-                    expired += (i,)
+                    expired.append(i)
 
             for i in expired:
                 self.disconnect(i)
@@ -844,7 +847,7 @@ class Peer:
             name: str,
             command: str,
             /,
-            args: Union[tuple, list] = (),
+            args: Union[list, tuple] = (),
             kwargs: dict = None,
             *,
             raise_: bool = True
@@ -854,8 +857,8 @@ class Peer:
         elif not self._connections[name].authorized:
             raise AccessError(f'"{name}" is unauthorized peer')
 
-        if args and not isinstance(args, (tuple, list)):
-            raise TypeError('args must be tuple or list')
+        if args and not isinstance(args, (list, tuple)):
+            raise TypeError('args must be list or tuple')
         if kwargs and not isinstance(kwargs, dict):
             raise TypeError('kwargs must be dict')
 
@@ -886,7 +889,7 @@ class Peer:
         if self._state == 1:
             self._state = 2
             self.listener.join()
-            for i in tuple(self._connections):
+            for i in list(self._connections):
                 self.disconnect(i)
             self._server.close()
 
