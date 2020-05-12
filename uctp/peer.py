@@ -60,6 +60,9 @@ class Annotation:
     def __init__(self, annotation: Type[Any] = type(None)):
         if not isinstance(annotation, type) and annotation is not Any:
             raise TypeError('annotation must be type')
+        elif annotation not in (int, float, bool, str, list, dict, Any, type(None)):
+            raise TypeError(
+                'Only int, float, bool, str, list, dict, NoneType, typing.Any types are supported as annotation')
 
         self.type_ = annotation
 
@@ -86,16 +89,15 @@ class Parameter:
     default: Any = None
 
     def __post_init__(self):
-        if isinstance(self.name, str):
-            if self.name.__len__() > 32:
-                raise ValueError('Name length must be less than 32')
-        else:
-            raise TypeError('Name must be str')
+        if not isinstance(self.name, str):
+            raise TypeError('name must be str')
         if not isinstance(self.annotation, Annotation):
             raise TypeError('annotation must be Annotation')
+        if not isinstance(self.default, (int, float, bool, str, list, dict, type(None))):
+            raise TypeError('Only int, float, bool, str, list, dict, NoneType types are supported as default value')
 
     def export(self) -> tuple:
-        return self.name, str(self.annotation), True if self.default else False
+        return self.name, str(self.annotation), self.default
 
 
 class Aliases(dict):
@@ -232,7 +234,8 @@ class Commands:
             defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
         else:
             defaults = {}
-        param_list: tuple = ()
+        args_list: list = []
+        kwargs_list: list = []
 
         if inspect.ismethod(func):
             del params.args[0]
@@ -243,20 +246,26 @@ class Commands:
             del params.args[0]
 
         for i in params.args:
-            param_list += (Parameter(
+            args_list.append(Parameter(
                 i,
                 Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
-                defaults[i] if i in defaults else type(None)
-            ),)
+                defaults[i] if i in defaults else None
+            ))
+
+        for i in params.kwonlyargs:
+            kwargs_list.append(Parameter(
+                i,
+                Annotation(params.annotations[i]) if i in params.annotations else Annotation(),
+                params.kwonlydefaults[i] if i in params.kwonlydefaults else None
+            ))
 
         self.storage[name_] = {
             'func': func,
-            'params': {
-                'list': param_list,
-                'args': True if params.varargs else False,
-                'kwargs': True if params.varkw else False,
-                'peer': peer
-            },
+            'args': args_list,
+            'kwargs': kwargs_list,
+            'varargs': params.varargs if params.varargs else '',
+            'varkw': params.varkw if params.varkw else '',
+            'peer': peer,
             'returns': returns_,
             'protected': protected,
             'encrypt': encrypt
@@ -282,12 +291,45 @@ class Commands:
         else:
             raise NameError('Command not found')
 
-    def execute(self, peer: Connection, name: str, *args: tuple, **kwargs: dict) -> Tuple[bool, Any]:
+    def execute(self, peer: Connection, name: str, *args, **kwargs) -> Tuple[bool, Any]:
         if name in self.storage:
-            if self.storage[name]['params']['peer']:
-                return True, self.storage[name]['func'](peer, *args, **kwargs)
+            command: dict = self.storage[name]
+            args: list = list(args)
+
+            for k, v in enumerate(args[:len(command['args'])]):
+                type_ = command['args'][k].annotation.type_
+                try:
+                    if type_ in (int, float, str):
+                        args[k] = type_(v)
+                    elif type_ in (list, dict):
+                        args[k] = json.loads(v)
+                    elif type_ is bool:
+                        if v in ('false', 'False'):
+                            args[k] = False
+                        else:
+                            args[k] = bool(v)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+
+            for k, v in kwargs.items():
+                type_ = command['kwargs'][k].annotation.type_
+                try:
+                    if type_ in (int, float, str):
+                        kwargs[k] = type_[k](v)
+                    elif type_ in (list, dict):
+                        kwargs[k] = json.loads(v)
+                    elif type_ is bool:
+                        if v in ('false', 'False'):
+                            kwargs[k] = False
+                        else:
+                            kwargs[k] = bool(v)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+
+            if command['peer']:
+                return True, command['func'](peer, *args, **kwargs)
             else:
-                return True, self.storage[name]['func'](*args, **kwargs)
+                return True, command['func'](*args, **kwargs)
         else:
             return False, None
 
@@ -295,11 +337,10 @@ class Commands:
         snapshot = {}
         for k, v in self.storage.items():
             snapshot[k] = {
-                'params': {
-                    'list': tuple(i.export() for i in v['params']['list']),
-                    'args': v['params']['args'],
-                    'kwargs': v['params']['kwargs']
-                },
+                'args': [i.export() for i in v['args']],
+                'kwargs': [i.export() for i in v['kwargs']],
+                'varargs': v['varargs'],
+                'varkw': v['varkw'],
                 'returns': str(v['returns']),
                 'protected': v['protected'],
                 'encrypt': v['encrypt']
