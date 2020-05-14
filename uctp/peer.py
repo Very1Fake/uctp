@@ -15,7 +15,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Type, Dict, Tuple, Union
+from typing import Any, Type, Dict, Tuple, Union, List
 
 from Crypto import Random
 from Crypto.Cipher import PKCS1_OAEP
@@ -298,7 +298,8 @@ class Commands:
             args: list = list(args)
 
             for k, v in enumerate(args[:len(command['args'])]):
-                if not isinstance(v, type_ := command['args'][k].annotation.type_):
+                type_ = command['args'][k].annotation.type_
+                if type_ is not Any and not isinstance(v, type_):
                     try:
                         if type_ in (int, float, str):
                             args[k] = type_(v)

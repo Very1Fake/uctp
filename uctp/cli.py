@@ -314,7 +314,7 @@ def main():
                               f'\tSHA256: {hashlib.sha256(key_.publickey().export_key("DER")).hexdigest()}'
                               f'\nCan be used for uctp: {"Yes" if key_.has_private() else "No"}')
                     else:
-                        exit_('File doesn\'t exist')
+                        exit_('File does not exist')
                 else:
                     key.print_usage()
         parser.print_usage()
