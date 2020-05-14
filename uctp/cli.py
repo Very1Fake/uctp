@@ -210,8 +210,9 @@ class Shell(cmd.Cmd):
     def do_fsend(self, line: str):
         """
         Send command to remote peer
-        Syntax: send <command> string
+        Syntax: fsend <command> string
         * string will be parsed as JSON (if string will be dict, it will be sent as kwargs)
+        * Instead of \"fsend\" you can use \"!\"
         """
 
         command, sep, string = line.partition(' ')

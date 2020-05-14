@@ -425,7 +425,7 @@ class Peer:
             auth_timeout: float = 8.0,
             max_connections: int = 8,
             interval: float = .01,
-            buffer: int = 4096,
+            buffer: int = 65535,
     ):
         self._state = 0
 
@@ -608,27 +608,32 @@ class Peer:
                 count += 1
         return count
 
-    def _recv(self, socket_: socket.socket) -> bytes:
+    def _receive(self, socket_: socket.socket) -> bytes:
         try:
-            data = socket_.recv(self.buffer)
-        except socket.error as e:
-            if e.errno is errno.ECONNRESET:
-                data = None
-            else:
-                raise e
-        return data
-
-    def _receive(self, socket_: socket.socket) -> bytearray:
-        try:
-            data = bytearray(self._recv(socket_))
+            try:
+                data = socket_.recv(protocol.HEADER_SIZE)
+            except socket.error as e:
+                if e.errno is errno.ECONNRESET:
+                    data = None
+                else:
+                    raise e
 
             if data:
                 header: protocol.Header = self._protocol.unpack_header(data)
 
-                if self._protocol.remained_data_size(len(data), header.flags.size) > 0:
-                    for i in range(
-                            math.ceil(self._protocol.remained_data_size(len(data), header.flags.size) / self.buffer)):
-                        data.extend(self._recv(socket_))
+                remains = header.flags.size
+
+                while remains > 0:
+                    try:
+                        temp = socket_.recv(remains if remains < self.buffer else self.buffer)
+
+                        remains -= len(temp)
+                        data += temp
+                    except socket.error as e:
+                        if e.errno is not errno.ECONNRESET:
+                            raise e
+
+                del temp
             return data
         except TypeError:
             return bytearray()
@@ -639,8 +644,7 @@ class Peer:
                 peer.socket.setblocking(True)
                 peer.socket.sendall(packet.raw())
 
-                data = self._receive(peer.socket)
-                if data:
+                if data := self._receive(peer.socket):
                     try:
                         packet_ = self._protocol.unpack(data)
 
