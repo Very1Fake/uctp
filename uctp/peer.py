@@ -15,7 +15,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Type, Dict, Tuple, Union
+from typing import Any, Type, Dict, Tuple, Union, List
 
 from Crypto import Random
 from Crypto.Cipher import PKCS1_OAEP
@@ -204,11 +204,24 @@ class Connection:
         }
 
 
-class Commands:
-    storage: dict
+class Commands(dict):
+    def __setitem__(self, key, value):
+        raise RuntimeError('Commands can be added only by add_() or add()')
 
-    def __init__(self):
-        self.storage: dict = {}
+    def __delitem__(self, key):
+        raise RuntimeError('Commands cannot be deleted')
+
+    def clear(self) -> None:
+        raise RuntimeError('Commands cannot be cleared')
+
+    def pop(self, k):
+        raise RuntimeError('Commands cannot be popped')
+
+    def popitem(self):
+        raise RuntimeError('Commands cannot be popped')
+
+    def update(self, __m, **kwargs) -> None:
+        raise RuntimeError('Commands cannot be updated')
 
     def add_(
             self,
@@ -224,12 +237,15 @@ class Commands:
             raise TypeError('returns must be type')
 
         name_ = name if name else func.__name__
+
+        if len(name_.encode()) > 32:
+            raise ValueError('Function name length cannot be more than 32 bytes')
+        elif name_ in self:
+            raise IndexError('Command with this name already exists')
+
         params = inspect.getfullargspec(func)
         returns_ = Annotation(returns) if returns else Annotation(params.annotations['return']) if \
             'return' in params.annotations else Annotation()
-
-        if name_ in self.storage:
-            raise IndexError('Command with this name already exists')
 
         if params.defaults:
             defaults = dict(zip(reversed(params.args), reversed(params.defaults)))
@@ -260,7 +276,7 @@ class Commands:
                 params.kwonlydefaults[i] if i in params.kwonlydefaults else None
             ))
 
-        self.storage[name_] = {
+        super().__setitem__(name_, {
             'func': func,
             'args': args_list,
             'kwargs': kwargs_list,
@@ -270,7 +286,7 @@ class Commands:
             'returns': returns_,
             'protected': protected,
             'encrypt': encrypt
-        }
+        })
 
     def add(
             self,
@@ -286,19 +302,37 @@ class Commands:
 
         return decorator
 
+    def alias(self, name: str, command: str) -> None:
+        if isinstance(name, str):
+            if len(name.encode()) > 32:
+                raise ValueError('name length cannot be more than 32 bytes')
+            elif name in self:
+                raise IndexError('Command with this name already exists')
+        else:
+            raise TypeError('name must be str or list of str')
+
+        if command not in self:
+            raise IndexError('command does not exist')
+
+        super().__setitem__(name, {'command': command})
+
     def get(self, name: str) -> dict:
-        if name in self.storage:
-            return self.storage[name]
+        if name in self:
+            if 'command' in self[name]:
+                return self[self[name]['command']]
+            else:
+                return self[name]
         else:
             raise NameError('Command not found')
 
     def execute(self, peer: Connection, name: str, *args, **kwargs) -> Tuple[bool, Any]:
-        if name in self.storage:
-            command: dict = self.storage[name]
+        if name in self:
+            command: dict = self[self[name]['command']] if 'command' in self[name] else self[name]
             args: list = list(args)
 
             for k, v in enumerate(args[:len(command['args'])]):
-                if not isinstance(v, type_ := command['args'][k].annotation.type_):
+                type_ = command['args'][k].annotation.type_
+                if type_ is not Any and not isinstance(v, type_):
                     try:
                         if type_ in (int, float, str):
                             args[k] = type_(v)
@@ -338,16 +372,20 @@ class Commands:
 
     def export(self) -> dict:
         snapshot = {}
-        for k, v in self.storage.items():
-            snapshot[k] = {
-                'args': [i.export() for i in v['args']],
-                'kwargs': [i.export() for i in v['kwargs']],
-                'varargs': v['varargs'],
-                'varkw': v['varkw'],
-                'returns': str(v['returns']),
-                'protected': v['protected'],
-                'encrypt': v['encrypt']
-            }
+        for k, v in self.items():
+            if 'command' in v:
+                snapshot[v['command']]['aliases'].append(k)
+            else:
+                snapshot[k] = {
+                    'aliases': [],
+                    'args': [i.export() for i in v['args']],
+                    'kwargs': [i.export() for i in v['kwargs']],
+                    'varargs': v['varargs'],
+                    'varkw': v['varkw'],
+                    'returns': str(v['returns']),
+                    'protected': v['protected'],
+                    'encrypt': v['encrypt']
+                }
         return snapshot
 
 
@@ -387,7 +425,7 @@ class Peer:
             auth_timeout: float = 8.0,
             max_connections: int = 8,
             interval: float = .01,
-            buffer: int = 4096,
+            buffer: int = 65535,
     ):
         self._state = 0
 
@@ -570,27 +608,32 @@ class Peer:
                 count += 1
         return count
 
-    def _recv(self, socket_: socket.socket) -> bytes:
+    def _receive(self, socket_: socket.socket) -> bytes:
         try:
-            data = socket_.recv(self.buffer)
-        except socket.error as e:
-            if e.errno is errno.ECONNRESET:
-                data = None
-            else:
-                raise e
-        return data
-
-    def _receive(self, socket_: socket.socket) -> bytearray:
-        try:
-            data = bytearray(self._recv(socket_))
+            try:
+                data = socket_.recv(protocol.HEADER_SIZE)
+            except socket.error as e:
+                if e.errno is errno.ECONNRESET:
+                    data = None
+                else:
+                    raise e
 
             if data:
                 header: protocol.Header = self._protocol.unpack_header(data)
 
-                if self._protocol.remained_data_size(len(data), header.flags.size) > 0:
-                    for i in range(
-                            math.ceil(self._protocol.remained_data_size(len(data), header.flags.size) / self.buffer)):
-                        data.extend(self._recv(socket_))
+                remains = header.flags.size
+
+                while remains > 0:
+                    try:
+                        temp = socket_.recv(remains if remains < self.buffer else self.buffer)
+
+                        remains -= len(temp)
+                        data += temp
+                    except socket.error as e:
+                        if e.errno is not errno.ECONNRESET:
+                            raise e
+
+                del temp
             return data
         except TypeError:
             return bytearray()
@@ -601,8 +644,7 @@ class Peer:
                 peer.socket.setblocking(True)
                 peer.socket.sendall(packet.raw())
 
-                data = self._receive(peer.socket)
-                if data:
+                if data := self._receive(peer.socket):
                     try:
                         packet_ = self._protocol.unpack(data)
 

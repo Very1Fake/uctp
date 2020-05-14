@@ -86,7 +86,7 @@ class Header:
 
         if isinstance(self.command, bytes):
             if len(self.command) > 32:
-                raise ValueError('command max length is 32 bytes')
+                raise ValueError('command length cannot be more than 32 bytes')
         else:
             raise TypeError('command must be bytes')
 
@@ -222,7 +222,7 @@ class Protocol:
                     type_,
                     encrypt,
                     key.size_in_bytes() if key else self.key.size_in_bytes() if encrypt else 0,
-                    len(data)
+                    len(encrypted) if encrypt else len(data)
                 ),
                 command,
                 b'\x00' * 32

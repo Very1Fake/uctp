@@ -78,7 +78,7 @@ class Shell(cmd.Cmd):
                 commands_ = []
                 for k, v in result.items():
                     commands_.append('{0}({1}) -> {2}'.format(
-                        k,
+                        f'[{", ".join([k] + v["aliases"])}]' if v['aliases'] else k,
                         ', '.join(
                             [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
                              f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['args']] +
@@ -210,8 +210,9 @@ class Shell(cmd.Cmd):
     def do_fsend(self, line: str):
         """
         Send command to remote peer
-        Syntax: send <command> string
+        Syntax: fsend <command> string
         * string will be parsed as JSON (if string will be dict, it will be sent as kwargs)
+        * Instead of \"fsend\" you can use \"!\"
         """
 
         command, sep, string = line.partition(' ')
@@ -314,7 +315,7 @@ def main():
                               f'\tSHA256: {hashlib.sha256(key_.publickey().export_key("DER")).hexdigest()}'
                               f'\nCan be used for uctp: {"Yes" if key_.has_private() else "No"}')
                     else:
-                        exit_('File doesn\'t exist')
+                        exit_('File does not exist')
                 else:
                     key.print_usage()
         parser.print_usage()
