@@ -11,8 +11,9 @@ import readline
 import sys
 import textwrap
 from datetime import datetime
-from typing import Union, Tuple
+from typing import Union, Tuple, List, Any
 
+import yaml
 from Crypto.PublicKey import RSA
 
 from . import __copyright__, __version__
@@ -40,7 +41,7 @@ connect.add_argument('-n', '--name', type=str, help='Name for peer')
 connect.add_argument('-p', '--port', nargs='?', default=2604, type=int, help='Port of remote peer')
 connect.add_argument('-k', '--key', nargs='?', type=argparse.FileType('r', encoding='utf8'),
                      help='File with private RSA key. If not specified, key will be generated')
-connect.add_argument('-r', '--raw', action='store_true', help='Print raw data of response')
+connect.add_argument('-j', '--json', action='store_true', help='JSON mode for beautiful output')
 
 key = commands.add_parser('key', help='Key generator and validator')
 key.add_argument('file', type=str, help='Path to file that stores RSA key')
@@ -55,14 +56,14 @@ class Shell(cmd.Cmd):
     _peer: peer.Peer
     _history: str = os.path.expanduser('~/.uctp-cli-history')
 
-    raw: bool
+    json: bool
 
-    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int, raw_output: bool = False):
+    def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int, json_mode: bool = False):
         self._peer = peer.Peer(name, key_, '0.0.0.0', 0, max_connections=0)
         self._peer.run()
         self._peer.connect(ip, port)
 
-        self.raw = raw_output
+        self.json = json_mode
 
         readline.set_history_length(100)
 
@@ -71,41 +72,52 @@ class Shell(cmd.Cmd):
         self.nohelp = '- No help for this command "%s"'
         super().__init__()
 
-    def _print(self, command: str, result) -> None:
-        output = ''
-        if not self.raw:
-            if command == '_commands':
-                commands_ = []
-                for k, v in result.items():
-                    commands_.append('{0}({1}) -> {2}'.format(
-                        f'[{", ".join([k] + v["aliases"])}]' if v['aliases'] else k,
-                        ', '.join(
-                            [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
-                             f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['args']] +
-                            (['*'] if v['kwargs'] else []) +
-                            [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
-                             f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['kwargs']] +
-                            ([f'*{v["varargs"]}'] if v['varargs'] else []) + ([f'**{v["varkw"]}'] if v['varkw'] else [])
-                        ),
-                        v['returns']
-                    ))
-                output = '\n'.join(commands_)
-            elif command == '_me':
-                output = f'Name: {result["name"]}\nAddress: {result["ip"]}:{result["port"]}\nConnected: ' \
-                         f'{datetime.utcfromtimestamp(result["timestamp"]).isoformat()}\nKey (SHA1): ' \
-                         f'{result["key"]}\nSession: {result["session"]}'
-            elif command == '_peers':
-                output = '\n'.join([
-                    f'{i["name"]} Key (SHA1): {i["key"]}, Session: {i["session"]}\n{"":>{len(i["name"])}} '
-                    f'Address: {i["ip"]}:{i["port"]}, Connected: '
-                    f'{datetime.utcfromtimestamp(i["timestamp"]).isoformat()}{" (client)" if i["client"] else ""}'
-                    for i in result
-                ])
-            elif command == '_trusted':
-                output = ', '.join(result)
-            elif command == '_aliases':
-                output = '\n'.join([f'{v}: {k}' for k, v in result.items()])
-        print(f'\n{output if output else result}\n')
+    def _send(self, command: str, _args: List[str]) -> Tuple[int, Any]:
+        args = []
+        buffer = []
+
+        try:
+            for i in _args:
+                if buffer:
+                    if i.endswith(("'", '"')):
+                        buffer.append(i[:-1])
+                        args.append(json.loads(''.join(buffer)))
+                        buffer.clear()
+                    else:
+                        buffer.append(i)
+                else:
+                    if i.startswith(("'", '"')):
+                        if i.endswith(("'", '"')):
+                            args.append(json.loads(i[1:-1]))
+                        else:
+                            buffer.append(i[1:])
+                    else:
+                        args.append(i)
+
+            try:
+                status, result = self._peer.send(self.connected()[1], command, args)
+
+                return status, result
+            except Exception as e:
+                print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
+        except json.JSONDecodeError:
+            print('Error while parsing arguments')
+
+    def _fsend(self, command: str, source: str) -> Tuple[int, Any]:
+        try:
+            string = json.loads(source)
+            if isinstance(string, dict):
+                status, result = self._peer.send(self.connected()[1], command, kwargs=string)
+            elif isinstance(string, list):
+                status, result = self._peer.send(self.connected()[1], command, string)
+            else:
+                status, result = self._peer.send(self.connected()[1], command, (string,))
+
+            return status, result
+        except json.JSONDecodeError:
+            print('Error while parsing (JSON)')
+        except Exception as e:
+            print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
 
     def connected(self) -> Tuple[bool, Union[str, type(None)]]:
         try:
@@ -152,8 +164,12 @@ class Shell(cmd.Cmd):
         try:
             if line[0] == '/':
                 line = 'send ' + line[1:]
+            elif line[0] == '@':
+                line = 'bsend ' + line[1:]
             elif line[0] == '!':
                 line = 'fsend ' + line[1:]
+            elif line[0] == '\\':
+                line = 'ssend ' + line[1:]
         finally:
             return line
 
@@ -173,39 +189,61 @@ class Shell(cmd.Cmd):
         Syntax: send <command> [args]
         * Instead of \"send\" you can use \"/\"
         """
-        command = line.split(' ')[0]
-        args = []
-        buffer = []
+
+        line = line.split(' ')
+
+        print(self._send(line[0], line[1:])[1])
+
+    def do_bsend(self, line: str):
+        """
+        Send command to remote peer (beautiful output)
+        Syntax: bsend <command> [args]
+        * Instead of \"send\" you can use \"@\"
+        """
+
+        line = line.split(' ')
+        command, args = line[0], line[1:]
+        del line
 
         try:
-            for i in line.split(' ')[1:]:
-                if buffer:
-                    if i.endswith(("'", '"')):
-                        buffer.append(i[:-1])
-                        args.append(json.loads(''.join(buffer)))
-                        buffer.clear()
-                    else:
-                        buffer.append(i)
-                else:
-                    if i.startswith(("'", '"')):
-                        if i.endswith(("'", '"')):
-                            args.append(json.loads(i[1:-1]))
-                        else:
-                            buffer.append(i[1:])
-                    else:
-                        args.append(i)
+            status, result = self._send(command, args)
+        except TypeError:
+            return
 
-            try:
-                status, result = self._peer.send(self.connected()[1], command, args)
-
-                if status == 1:
-                    self._print(command, result)
-                else:
-                    print(f'\n{result}\n')
-            except Exception as e:
-                print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
-        except json.JSONDecodeError:
-            print('Error while parsing arguments')
+        if command == '_commands':
+            commands_ = []
+            for k, v in result.items():
+                commands_.append('{0}({1}) -> {2}'.format(
+                    f'[{", ".join([k] + v["aliases"])}]' if v['aliases'] else k,
+                    ', '.join(
+                        [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
+                         f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['args']] +
+                        (['*'] if v['kwargs'] else []) +
+                        [f'{i[0]}{f": {i[1]}" if i[1] != "None" else ""}'
+                         f'{f" = {i[2]}" if i[2] is not None else ""}' for i in v['kwargs']] +
+                        ([f'*{v["varargs"]}'] if v['varargs'] else []) + ([f'**{v["varkw"]}'] if v['varkw'] else [])
+                    ),
+                    v['returns']
+                ))
+            print('\n{}\n'.format('\n'.join(commands_)))
+        elif command == '_me':
+            print(f'\nName: {result["name"]}\nAddress: {result["ip"]}:{result["port"]}\nConnected: '
+                  f'{datetime.utcfromtimestamp(result["timestamp"]).isoformat()}\nKey (SHA1): '
+                  f'{result["key"]}\nSession: {result["session"]}\n')
+        elif command == '_peers':
+            print('\n{}\n'.format('\n'.join([
+                f'{i["name"]} Key (SHA1): {i["key"]}, Session: {i["session"]}\n{"":>{len(i["name"])}} '
+                f'Address: {i["ip"]}:{i["port"]}, Connected: '
+                f'{datetime.utcfromtimestamp(i["timestamp"]).isoformat()} UTC{" (client)" if i["client"] else ""}\n'
+                f'{"":>{len(i["name"])}} Last activity: {datetime.utcfromtimestamp(i["last_activity"]).isoformat()} UTC'
+                for i in result
+            ])))
+        elif command == '_trusted':
+            print(f'\n{", ".join(result)}\n')
+        elif command == '_aliases':
+            print('\n{}\n'.format('\n'.join([f'{v}: {k}' for k, v in result.items()])))
+        else:
+            print(f'\n{json.dumps(result, indent=4) if self.json else yaml.safe_dump(result)}\n')
 
     def do_fsend(self, line: str):
         """
@@ -218,19 +256,18 @@ class Shell(cmd.Cmd):
         command, sep, string = line.partition(' ')
 
         try:
-            string = json.loads(string)
-            if isinstance(string, dict):
-                status, result = self._peer.send(self.connected()[1], command, kwargs=string)
-            elif isinstance(string, list):
-                status, result = self._peer.send(self.connected()[1], command, string)
-            else:
-                status, result = self._peer.send(self.connected()[1], command, (string,))
-            if status == 1:
-                self._print(command, result)
-            else:
-                print(f'\n{result}\n')
-        except json.JSONDecodeError:
-            print('Error while parsing (JSON)')
+            print(self._fsend(command, string)[1])
+        except TypeError:
+            return
+
+    def do_ssend(self, line: str):
+        """
+        Silent send command to remote peer (without output)
+        Syntax: ssend <command> [args]
+        * Instead of \"ssend\" you can use \"\\"
+        """
+        try:
+            self._peer.send(self.connected()[1], line.split(' ')[0], line.split(' ')[1:])
         except Exception as e:
             print(f'\n{e.__class__.__name__}: {e.__str__()}\n')
 
@@ -263,7 +300,7 @@ def main():
                         key_,
                         args.ip,
                         args.port,
-                        args.raw
+                        args.json
                     ).start()
                     exit()
                 except Exception as e:
