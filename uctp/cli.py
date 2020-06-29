@@ -234,7 +234,8 @@ class Shell(cmd.Cmd):
             print('\n{}\n'.format('\n'.join([
                 f'{i["name"]} Key (SHA1): {i["key"]}, Session: {i["session"]}\n{"":>{len(i["name"])}} '
                 f'Address: {i["ip"]}:{i["port"]}, Connected: '
-                f'{datetime.utcfromtimestamp(i["timestamp"]).isoformat()}{" (client)" if i["client"] else ""}'
+                f'{datetime.utcfromtimestamp(i["timestamp"]).isoformat()} UTC{" (client)" if i["client"] else ""}\n'
+                f'{"":>{len(i["name"])}} Last activity: {datetime.utcfromtimestamp(i["last_activity"]).isoformat()} UTC'
                 for i in result
             ])))
         elif command == '_trusted':

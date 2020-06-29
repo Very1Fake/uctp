@@ -8,14 +8,13 @@ import errno
 import hashlib
 import inspect
 import json
-import math
 import queue
 import select
 import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Type, Dict, Tuple, Union, List
+from typing import Any, Type, Dict, Tuple, Union
 
 from Crypto import Random
 from Crypto.Cipher import PKCS1_OAEP
@@ -143,24 +142,32 @@ class Trusted(list):
 
 @dataclass
 class Connection:
+    _last_activity: float = field(init=False, default=None)
+    _key: RSA.RsaKey = field(init=False, default=None)
+    _to_close: bool = field(init=False, default=False)
+
     name: str
     ip: str
     port: int
     socket: socket.socket
     client: bool
     authorized: bool = field(default=False)
-    _key: RSA.RsaKey = field(init=False, default=None)
-    _to_close: bool = field(init=False, default=False)
     lock: threading.Lock = field(init=False)
     timestamp: float = field(init=False)
     session: str = field(init=False)
     messages: queue.Queue = field(init=False)
 
     def __post_init__(self):
+        self._last_activity = time.time()
+
         self.lock = threading.Lock()
         self.timestamp = time.time()
         self.session = hashlib.sha1(Random.new().read(128)).hexdigest()
         self.messages = queue.Queue()
+
+    @property
+    def last_activity(self):
+        return self._last_activity
 
     @property
     def key(self) -> RSA.RsaKey:
@@ -179,6 +186,9 @@ class Connection:
     @property
     def to_close(self) -> bool:
         return self._to_close
+
+    def update_activity(self):
+        self._last_activity = time.time()
 
     def key_hash(self) -> str:
         if self.key:
@@ -201,6 +211,7 @@ class Connection:
             'key': self.key_hash(),
             'timestamp': self.timestamp,
             'session': self.session,
+            'last_activity': self._last_activity
         }
 
 
@@ -404,6 +415,7 @@ class Peer:
     listener: threading.Thread
     trusted: Trusted
 
+    inactivity_kick: float
     timeout: float
     auth_timeout: float
     interval: float
@@ -421,6 +433,7 @@ class Peer:
             *,
             trusted: Trusted = None,
             aliases: Aliases = None,
+            inactivity_kick: float = 120.0,
             timeout: float = 4.0,
             auth_timeout: float = 8.0,
             max_connections: int = 8,
@@ -458,6 +471,10 @@ class Peer:
             self.aliases = Aliases()
         else:
             raise TypeError('aliases must be Aliases')
+        if isinstance(inactivity_kick, (float, int)):
+            self.inactivity_kick = inactivity_kick
+        else:
+            raise TypeError('inactivity_kick must be float or int')
         if isinstance(timeout, (float, int)):
             self.timeout = timeout
         else:
@@ -714,6 +731,7 @@ class Peer:
                         if data:
                             try:
                                 data = self._protocol.unpack(data)
+
                                 if self._state == 1:
                                     i.messages.put(data)
                                 elif self._state == 2:
@@ -724,6 +742,8 @@ class Peer:
                                         'Peer shuts down',
                                         bool(i.key)
                                     ))
+
+                                i.update_activity()
                                 i.lock.release()
                             except protocol.ProtocolError:
                                 self.disconnect(i.name)
@@ -809,11 +829,11 @@ class Peer:
                 self.disconnect(i)
 
             expired: list = []
-            for i in self._connections:
-                if not self._connections[i].authorized and \
-                        self._connections[i].timestamp + self.auth_timeout < time.time() or \
-                        self._connections[i].to_close or self._connections[i].socket._closed:
-                    expired.append(i)
+            for k, v in self._connections.items():
+                if not v.authorized and v.timestamp + self.auth_timeout < time.time() or v.to_close or \
+                        v.socket._closed or (self.inactivity_kick > 0 and
+                                             v.last_activity + self.inactivity_kick < time.time()):
+                    expired.append(k)
 
             for i in expired:
                 self.disconnect(i)
@@ -877,7 +897,7 @@ class Peer:
         else:
             self._raise_error(result)
 
-    def disconnect(self, name: str):
+    def disconnect(self, name: str) -> None:
         if name in self._connections:
             self._connections[name].socket.close()
             del self._connections[name]
@@ -893,7 +913,7 @@ class Peer:
             kwargs: dict = None,
             *,
             raise_: bool = True
-    ):
+    ) -> Tuple[int, Any]:
         if name not in self._connections:
             raise NameError(f'Peer "{name}" not connected')
         elif not self._connections[name].authorized:
