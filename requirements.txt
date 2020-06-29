@@ -1,1 +1,2 @@
-pycryptodome>=3.9.7
+pycryptodome==3.9.8
+PyYAML==5.3.1
