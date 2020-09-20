@@ -60,7 +60,7 @@ class Shell(cmd.Cmd):
 
     def __init__(self, name: str, key_: RSA.RsaKey, ip: str, port: int, json_mode: bool = False):
         self._peer = peer.Peer(name, key_, '0.0.0.0', 0, max_connections=0)
-        self._peer.run()
+        self._peer.start()
         self._peer.connect(ip, port)
 
         self.json = json_mode

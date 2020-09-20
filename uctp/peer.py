@@ -3,7 +3,7 @@
 # TODO: Fix error when select() without timeout
 # TODO: Go to SHA3_256
 # TODO: Reusable instance
-
+import abc
 import errno
 import hashlib
 import inspect
@@ -14,7 +14,7 @@ import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Type, Dict, Tuple, Union
+from typing import Any, Type, Dict, Tuple, Union, TypeVar, Optional
 
 from Crypto import Random
 from Crypto.Cipher import PKCS1_OAEP
@@ -400,6 +400,15 @@ class Commands(dict):
         return snapshot
 
 
+class ErrorHandler:
+    @abc.abstractmethod
+    def handle(self, peer, exception: Exception):
+        raise NotImplementedError
+
+
+ErrorHandlerType = TypeVar('ErrorHandlerType', bound=ErrorHandler)
+
+
 class Peer:
     _name: str
     _key: RSA.RsaKey
@@ -414,6 +423,7 @@ class Peer:
     commands: Commands
     listener: threading.Thread
     trusted: Trusted
+    error_handler: Optional[ErrorHandlerType]
 
     inactivity_kick: float
     timeout: float
@@ -439,6 +449,7 @@ class Peer:
             max_connections: int = 8,
             interval: float = .01,
             buffer: int = 65535,
+            error_handler: ErrorHandlerType = None
     ):
         self._state = 0
 
@@ -497,6 +508,13 @@ class Peer:
             self.buffer = buffer
         else:
             raise TypeError('buffer must be int')
+        if error_handler:
+            if issubclass(type(error_handler), ErrorHandler):
+                self.error_handler = error_handler
+            else:
+                raise TypeError('error_handler must be subclass of ErrorHandler')
+        else:
+            self.error_handler = None
         self._protocol = protocol.Protocol(self._key)
         self._increment = 0
 
@@ -695,153 +713,159 @@ class Peer:
 
     def listener_loop(self):
         while self._state > 0:
-            start = time.time()
+            try:
+                start = time.time()
 
-            readers: list = [self._server]
-            for i in self._connections.values():
-                readers.append(i)
+                readers: list = [self._server]
+                for i in self._connections.values():
+                    readers.append(i)
 
-            writers: list = [i for i in self._connections.values() if not i.messages.empty()]
+                writers: list = [i for i in self._connections.values() if not i.messages.empty()]
 
-            if self._state == 2 and not writers:
-                self._state = 0
+                if self._state == 2 and not writers:
+                    self._state = 0
 
-            readable, writeable, exceptional = select.select(readers, writers, readers, .001)
+                readable, writeable, exceptional = select.select(readers, writers, readers, .001)
 
-            for i in readable:
-                if i is self._server:
-                    peer = self._server.accept()
+                for i in readable:
+                    if i is self._server:
+                        peer = self._server.accept()
 
-                    if self.max_connections < 0 or self._clients_count() >= self.max_connections:
-                        peer[0].close()
-                    else:
-                        peer[0].setblocking(False)
-                        increment = self.increment
-                        self._connections[f"_{increment}"] = Connection(
-                            f"_{increment}",
-                            peer[1][0],
-                            peer[1][1],
-                            peer[0],
-                            True
-                        )
-                else:
-                    if i.lock.acquire(False):
-                        data = self._receive(i.socket)
-
-                        if data:
-                            try:
-                                data = self._protocol.unpack(data)
-
-                                if self._state == 1:
-                                    i.messages.put(data)
-                                elif self._state == 2:
-                                    i.messages.put(self._error(
-                                        i,
-                                        data.header.command,
-                                        0,
-                                        'Peer shuts down',
-                                        bool(i.key)
-                                    ))
-
-                                i.update_activity()
-                                i.lock.release()
-                            except protocol.ProtocolError:
-                                self.disconnect(i.name)
-                            except protocol.DamageError:
-                                self.disconnect(i.name)
+                        if self.max_connections < 0 or self._clients_count() >= self.max_connections:
+                            peer[0].close()
                         else:
-                            self.disconnect(i.name)
+                            peer[0].setblocking(False)
+                            increment = self.increment
+                            self._connections[f"_{increment}"] = Connection(
+                                f"_{increment}",
+                                peer[1][0],
+                                peer[1][1],
+                                peer[0],
+                                True
+                            )
+                    else:
+                        if i.lock.acquire(False):
+                            data = self._receive(i.socket)
 
-            for i in writeable:
-                if i.lock.acquire(False):
-                    packet: protocol.Packet = i.messages.get_nowait()
-
-                    if packet.header.flags.type == protocol.TYPE_REQUEST:
-                        try:
-                            encrypt = self.commands.get(packet.header.command.decode())['encrypt']
-                            if self.commands.get(packet.header.command.decode())['protected'] and not i.authorized:
-                                packet = self._error(i, packet.header.command, 1, 'Access denied', encrypt)
-                            else:
-                                args: list = []
-                                kwargs: dict = {}
-
+                            if data:
                                 try:
-                                    argv = json.loads(packet.data)
+                                    data = self._protocol.unpack(data)
 
-                                    if not isinstance(argv, list) or len(argv) > 2 or \
-                                            not all((isinstance(i, (list, dict)) for i in argv)):
-                                        raise ArgumentsError
+                                    if self._state == 1:
+                                        i.messages.put(data)
+                                    elif self._state == 2:
+                                        i.messages.put(self._error(
+                                            i,
+                                            data.header.command,
+                                            0,
+                                            'Peer shuts down',
+                                            bool(i.key)
+                                        ))
 
-                                    if len(argv) > 0:
-                                        if isinstance(argv[0], list):
-                                            args.extend(argv[0])
-                                        else:
-                                            kwargs.update(argv[0])
-                                    if len(argv) == 2:
-                                        if isinstance(argv[1], list):
-                                            args.extend(argv[1])
-                                        else:
-                                            kwargs.update(argv[1])
+                                    i.update_activity()
+                                    i.lock.release()
+                                except protocol.ProtocolError:
+                                    self.disconnect(i.name)
+                                except protocol.DamageError:
+                                    self.disconnect(i.name)
+                            else:
+                                self.disconnect(i.name)
+
+                for i in writeable:
+                    if i.lock.acquire(False):
+                        packet: protocol.Packet = i.messages.get_nowait()
+
+                        if packet.header.flags.type == protocol.TYPE_REQUEST:
+                            try:
+                                encrypt = self.commands.get(packet.header.command.decode())['encrypt']
+                                if self.commands.get(packet.header.command.decode())['protected'] and not i.authorized:
+                                    packet = self._error(i, packet.header.command, 1, 'Access denied', encrypt)
+                                else:
+                                    args: list = []
+                                    kwargs: dict = {}
 
                                     try:
-                                        result = self.commands.execute(
-                                            i,
-                                            packet.header.command.decode(),
-                                            *args,
-                                            **kwargs
-                                        )[1]
+                                        argv = json.loads(packet.data)
+
+                                        if not isinstance(argv, list) or len(argv) > 2 or \
+                                                not all((isinstance(i, (list, dict)) for i in argv)):
+                                            raise ArgumentsError
+
+                                        if len(argv) > 0:
+                                            if isinstance(argv[0], list):
+                                                args.extend(argv[0])
+                                            else:
+                                                kwargs.update(argv[0])
+                                        if len(argv) == 2:
+                                            if isinstance(argv[1], list):
+                                                args.extend(argv[1])
+                                            else:
+                                                kwargs.update(argv[1])
+
                                         try:
-                                            packet = self._protocol.pack(
-                                                packet.header.command,
-                                                json.dumps(result),
-                                                encrypt,
-                                                type_=1,
-                                                key=i.key
-                                            )
-                                        except json.JSONDecodeError:
-                                            packet = self._error(
-                                                i, packet.header.command, 2,
-                                                'Command tried to return objects that json does not support', encrypt
-                                            )
-                                    except Exception as e:
-                                        if isinstance(e, _PassException):
-                                            if isinstance(e.extract, NameError):
-                                                packet = self._error(
-                                                    i, packet.header.command, 3,
-                                                    e.extract.__str__(), encrypt
+                                            result = self.commands.execute(
+                                                i,
+                                                packet.header.command.decode(),
+                                                *args,
+                                                **kwargs
+                                            )[1]
+                                            try:
+                                                packet = self._protocol.pack(
+                                                    packet.header.command,
+                                                    json.dumps(result),
+                                                    encrypt,
+                                                    type_=1,
+                                                    key=i.key
                                                 )
-                                        else:
-                                            packet = self._error(
-                                                i, packet.header.command, 4,
-                                                f'Exception caught while executing command '
-                                                f'({e.__class__.__name__}: {e.__str__()})', encrypt
-                                            )
-                                except (json.JSONDecodeError, ArgumentsError):
-                                    packet = self._error(i, packet.header.command, 5, 'Wrong arguments', encrypt)
-                        except NameError:
-                            packet = self._error(i, packet.header.command, 6, 'Command not found', i.authorized)
-                    else:
-                        packet = self._error(i, packet.header.command, 7, 'Unexpected packet type', i.authorized)
-                    i.socket.send(packet.raw())
-                    i.lock.release()
+                                            except json.JSONDecodeError:
+                                                packet = self._error(
+                                                    i, packet.header.command, 2,
+                                                    'Command tried to return objects that json does not support', encrypt
+                                                )
+                                        except Exception as e:
+                                            if isinstance(e, _PassException):
+                                                if isinstance(e.extract, NameError):
+                                                    packet = self._error(
+                                                        i, packet.header.command, 3,
+                                                        e.extract.__str__(), encrypt
+                                                    )
+                                            else:
+                                                packet = self._error(
+                                                    i, packet.header.command, 4,
+                                                    f'Exception caught while executing command '
+                                                    f'({e.__class__.__name__}: {e.__str__()})', encrypt
+                                                )
+                                    except (json.JSONDecodeError, ArgumentsError):
+                                        packet = self._error(i, packet.header.command, 5, 'Wrong arguments', encrypt)
+                            except NameError:
+                                packet = self._error(i, packet.header.command, 6, 'Command not found', i.authorized)
+                        else:
+                            packet = self._error(i, packet.header.command, 7, 'Unexpected packet type', i.authorized)
+                        i.socket.send(packet.raw())
+                        i.lock.release()
 
-            for i in exceptional:
-                self.disconnect(i)
+                for i in exceptional:
+                    self.disconnect(i)
 
-            expired: list = []
-            for k, v in self._connections.items():
-                if not v.authorized and v.timestamp + self.auth_timeout < time.time() or v.to_close or \
-                        v.socket._closed or (self.inactivity_kick > 0 and
-                                             v.last_activity + self.inactivity_kick < time.time()):
-                    expired.append(k)
+                expired: list = []
+                for k, v in self._connections.items():
+                    if not v.authorized and v.timestamp + self.auth_timeout < time.time() or v.to_close or \
+                            v.socket._closed or (self.inactivity_kick > 0 and
+                                                 v.last_activity + self.inactivity_kick < time.time()):
+                        expired.append(k)
 
-            for i in expired:
-                self.disconnect(i)
+                for i in expired:
+                    self.disconnect(i)
 
-            delta = time.time() - start
+                delta = time.time() - start
 
-            if self.interval - delta > 0:
-                time.sleep(self.interval - delta)
+                if self.interval - delta > 0:
+                    time.sleep(self.interval - delta)
+            except Exception as e:
+                if self.error_handler:
+                    self.error_handler.handle(self, e)
+                else:
+                    raise e
 
     def connect(self, ip: str, port: int) -> bool:
         if self._state != 1:
@@ -939,7 +963,7 @@ class Peer:
 
         return type_, result
 
-    def run(self):
+    def start(self):
         if self._state != 1:
             self._state = 1
             self._server.settimeout(self.timeout)
@@ -953,6 +977,7 @@ class Peer:
             self.listener.join()
             for i in list(self._connections):
                 self.disconnect(i)
+            self._connections.clear()
             self._server.close()
 
     def _handshake(self, peer: Connection, name: str, key: str) -> dict:

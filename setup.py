@@ -26,7 +26,7 @@ setup(
         'Topic :: System :: Networking'
     ],
     python_requires='>=3.8',
-    install_requires=['pycryptodome>=3.9.7'],
+    install_requires=['pycryptodome>=3.9.8', 'PyYAML>=5.3.1'],
     scripts=['bin/uctp'],
     include_package_data=True,
     zip_safe=False
